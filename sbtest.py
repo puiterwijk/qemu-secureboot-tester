@@ -22,6 +22,13 @@ import uuid
 import sys
 
 
+EXIT_CODE_UNKNOWN       = 0
+EXIT_CODE_SETUP_ERROR   = 1
+EXIT_CODE_SHIM_ERROR    = 2
+EXIT_CODE_GRUB_ERROR    = 3
+EXIT_CODE_KERN_ERROR    = 4
+
+
 def strip_special(line):
     return ''.join([c for c in str(line) if c in string.printable])
 
@@ -348,6 +355,7 @@ def generate_disk(args):
 CMD_WAIT = 0
 CMD_PRESSKEY = 1
 CMD_SETEXITCODE = 2
+CMD_LOG = 3
 
 
 current_qemu_process = None
@@ -423,9 +431,11 @@ def perform_expect(commands, sin, sout, print_out):
                     logging.debug('Found expected string')
                     break
         elif opcode == CMD_SETEXITCODE:
-            code = int(args[0])
+            code = args[0]
             logging.debug('Setting future exit code to %d', code)
             current_exit_code = code
+        elif opcode == CMD_LOG:
+            logging.log(*args)
         else:
             raise Exception('Invalid command opcode %d (args %s)', opcode, args)
         t.cancel()
@@ -543,8 +553,38 @@ def enroll_keys(args):
 
 def test_boot(args):
     # Okay, that was all well and good... Let's now actually test this stuff!
-    pass
-
+    logging.debug("Starting VM to attempt boot")
+    cmds = [
+        # Browse to "Boot from file"
+        (CMD_WAIT,          'Select Language'),
+        (CMD_PRESSKEY,      'down', 3),
+        (CMD_PRESSKEY,      'ret'),
+        (CMD_WAIT,          'Boot From File'),
+        (CMD_PRESSKEY,      'down', 3),
+        (CMD_PRESSKEY,      'ret'),
+        (CMD_WAIT,          'NO VOLUME LABEL'),
+        (CMD_PRESSKEY,      'ret'),
+        # First attempt to start grubx64.efi, should drop us back
+        (CMD_WAIT,          'kernelx64.efi'),
+        (CMD_PRESSKEY,      'down', 4),
+        (CMD_PRESSKEY,      'ret'),
+        # Now attempt to start kernelx64.efi, should still not work. Cursor at grubx64.efi
+        (CMD_WAIT,          'kernelx64.efi'),
+        (CMD_PRESSKEY,      'down'),
+        (CMD_PRESSKEY,      'ret'),
+        # Now attempt to start shimx64.efi, should start.
+        (CMD_WAIT,          'kernelx64.efi'),
+        (CMD_SETEXITCODE,   EXIT_CODE_SHIM_ERROR),
+        (CMD_PRESSKEY,      'up', 2),
+        (CMD_PRESSKEY,      'ret'),
+        # We should now be at the grub2 prompt
+        (CMD_WAIT,          'grub>'),
+        (CMD_SETEXITCODE,   EXIT_CODE_GRUB_ERROR),
+        (CMD_LOG,           logging.INFO, "GRUB2 started correctly"),
+        (CMD_WAIT,          'grub>'),
+        # Grub started!
+    ]
+    run_expect(args, cmds)
 
 def main():
     args = parse_args()
