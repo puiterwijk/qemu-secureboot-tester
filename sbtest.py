@@ -629,10 +629,11 @@ def test_boot(args):
         # Let's verify that the built-in certs are parsed
         (CMD_WAIT,          'Loaded X.509 cert'),
         # Let's verify that the database key gets linked to the system keyring
-        (CMD_WAIT,          "EFI: Loaded cert 'SBTEXT "),
+        (CMD_WAIT,          "EFI: Loaded cert 'SBTEST "),
+        (CMD_WAIT,          "' linked to '.system_keyring'"),
     ]
     for cert in args.expect_cert:
-        cmds.append((CMD_WAIT, "EFI: Loaded cert '%s' linked to '.system_keyring'"))
+        cmds.append((CMD_WAIT, "EFI: Loaded cert '%s' linked to '.system_keyring'" % cert))
     run_expect(args, cmds)
 
 def main():
