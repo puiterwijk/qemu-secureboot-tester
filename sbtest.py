@@ -9,6 +9,7 @@
 from __future__ import print_function
 
 import argparse
+import threading
 import glob
 import os
 import logging
@@ -18,6 +19,7 @@ import shutil
 import string
 import subprocess
 import uuid
+import sys
 
 
 def strip_special(line):
@@ -137,8 +139,10 @@ def generate_qemu_cmd(args):
         '-drive',
         'file=%s,if=pflash,format=raw,unit=1,readonly=off' % (
             os.path.join(args.workdir, 'ovmf_vars.fd')),
-        '-serial', 'stdio',
-        '-hda', os.path.join(args.workdir, 'test.img'),
+        '-serial', 'mon:stdio',
+        '-drive',
+        'file=%s,if=ide,index=0,format=raw' % (
+            os.path.join(args.workdir, 'test.img')),
         '-boot', 'menu=on,order=c,strict=on']
 
 
@@ -159,6 +163,8 @@ def parse_args():
                         default='/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd')
     parser.add_argument('--ovmf-template-vars', help='OVMF empty vars file',
                         default='/usr/share/edk2/ovmf/OVMF_VARS.fd')
+    parser.add_argument('--shell', help='UEFI shell',
+                        default='/usr/share/edk2/ovmf/Shell.efi')
     parser.add_argument('--ovmf-really-secboot',
                         help='Assume the OVMF binary is secureboot capable',
                         action='store_true')
@@ -196,6 +202,8 @@ def validate_args(args):
         raise Exception('Qemu path invalid')
     if not os.path.exists(args.ovmf_binary):
         raise Exception('OVMF code path invalid')
+    if not os.path.exists(args.shell):
+        raise Exception('UEFI Shell path invalid')
     if 'secboot' not in args.ovmf_binary and not args.ovmf_really_secboot:
         raise Exception('OVMF binary is likely not secureboot enabled')
     if not args.test_signed:
@@ -237,25 +245,43 @@ def generate_keys(args):
                 '-out', '%s.crt' % keytype],
             cwd=args.workdir)
 
+    logging.debug('Converting certs to DER')
+    for keytype in keytypes:
+        run_command([
+                'openssl', 'x509',
+                '-in', '%s.crt' % keytype,
+                '-out', '%s.der' % keytype,
+                '-inform', 'pem',
+                '-outform', 'der'],
+            cwd=args.workdir)
+
     logging.debug('Converting certs to ESLs')
     for keytype in keytypes:
         run_command([
-                args.cert_to_efi_sig_list, '-g', keyuuid, '-k',
+                args.cert_to_efi_sig_list, '-g', keyuuid,
                 '%s.crt' % keytype,
                 '%s.esl' % keytype],
             cwd=args.workdir)
 
-
-    logging.debug('Converting certs to DER')
-    for keytype in keytypes:
-        run_command([
-                'openssl',
-                'x509',
-                '-outform', 'DER',
-                '-inform', 'PEM',
-                '-in', '%s.crt' % keytype,
-                '-out', '%s.der' % keytype],
-            cwd=args.workdir)
+    logging.debug('Signing ESLs')
+    # PK signs itself
+    run_command([
+            args.sign_efi_sig_list, '-g', keyuuid, 
+            '-k', 'PK.key', '-c', 'PK.crt',
+            'PK', 'PK.esl', 'PK.auth'],
+        cwd=args.workdir)
+    # PK signs KEK
+    run_command([
+            args.sign_efi_sig_list, '-g', keyuuid, 
+            '-k', 'PK.key', '-c', 'PK.crt',
+            'KEK', 'KEK.esl', 'KEK.auth'],
+        cwd=args.workdir)
+    # KEK signs DB
+    run_command([
+            args.sign_efi_sig_list, '-g', keyuuid, 
+            '-k', 'KEK.key', '-c', 'KEK.crt',
+            'db', 'db.esl', 'db.auth'],
+        cwd=args.workdir)
 
     logging.debug('Generating db P12 file')
     run_command([
@@ -300,10 +326,9 @@ def generate_disk(args):
                          os.path.join(args.workdir, 'test.img')) as disk:
         logging.debug('Generated loopback disk at: %s', disk)
         tocopy = []
-        for fname in os.listdir(args.workdir):
-            if fname.endswith('.der'):
-                tocopy.append((os.path.join(args.workdir, fname),
-                               os.path.join(disk, fname)))
+        for fname in ('db.der', 'KEK.der', 'PK.der'):
+            tocopy.append((os.path.join(args.workdir, fname),
+                           os.path.join(disk, fname)))
 
         tocopy.append((os.path.join(args.workdir, 'shimx64.signed.efi'),
                        os.path.join(disk, 'shimx64.signed.efi')))
@@ -320,6 +345,105 @@ def generate_disk(args):
         logging.debug('Files on test disk: %s', os.listdir(disk))
 
 
+CMD_WAIT = 0
+CMD_PRESSKEY = 1
+
+
+current_qemu_process = None
+
+
+def timeout_reached():
+    if current_qemu_process is None:
+        print('Timeout reached without qemu process?')
+        sys.exit(1)
+    else:
+        print('Timeout reached, aborting')
+        current_qemu_process.kill()
+        current_qemu_process.wait()
+        sys.exit(1)
+
+
+def perform_expect(commands, sin, sout, print_out):
+    read = sout.readline()
+    if b'char device redirected' not in read:
+        raise Exception('Not found expected char device info (%s)' % strip_special(read))
+    read = sout.readline()
+    if b'BdsDxe: No bootable option or device was found.' not in read:
+        raise Exception('Not found expected boot error (%s)' % strip_special(read))
+    read = sout.readline()
+    if b'BdsDxe: Press any key to enter the Boot Manager Menu.' not in read:
+        raise Exception('Not found expected boot message (%s)' % strip_special(read))
+    
+    # Activate the QEMU monitor
+    sin.write(b'\x01')
+    sin.write(b'c')
+    sin.flush()
+    read = sout.readline()
+    if b'QEMU ' not in read:
+        raise Exception('Not found expected QEMU header (%s)' % strip_special(read))
+    read = sout.read(7)
+    if read != b'(qemu) ':
+        raise Exception('Not found expected QEMU monitor prefix (%s)' % strip_special(read))
+    sin.write(b'sendkey ret\n')
+    sin.flush()
+
+    while len(commands) > 0:
+        t = threading.Timer(5.0, timeout_reached)
+        t.start()
+        cmd = commands[0]
+        opcode = cmd[0]
+        args = cmd[1:]
+        commands = commands[1:]
+        if opcode == CMD_PRESSKEY:
+            key = args[0].encode('ascii')
+            repeat = 1
+            if len(args) >= 2:
+                repeat = args[1]
+            logging.debug('Sending key %s %d times', key, repeat)
+            while repeat > 0:
+                sin.write(b'sendkey %s\n' % key)
+                sin.flush()
+                repeat -= 1
+        elif opcode == CMD_WAIT:
+            needle = args[0].encode('ascii')
+            logging.debug('Waiting for %s', needle)
+            buf = b''
+            while True:
+                read = sout.read(1)
+                if len(read) != 1:
+                    raise Exception('Error reading')
+                if print_out:
+                    print(strip_special(read), end='')
+                buf += read
+                if needle in buf:
+                    logging.debug('Found expected string')
+                    break
+        else:
+            raise Exception('Invalid command opcode %d (args %s)', opcode, args)
+        t.cancel()
+
+    logging.debug('Reached end of command sequence')
+
+
+def run_expect(args, commands):
+    global current_qemu_process
+
+    cmd = generate_qemu_cmd(args)
+    logging.debug('Running QEMU, command: %s', ' '.join(cmd))
+    p = subprocess.Popen(cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT)
+    current_qemu_process = p
+
+    try:
+        perform_expect(commands, p.stdin, p.stdout, args.print_output)
+    finally:
+        p.kill()
+        p.wait()
+    current_qemu_process = None
+
+
 def enroll_keys(args):
     shutil.copy(args.ovmf_template_vars,
                 os.path.join(args.workdir, 'ovmf_vars.fd'))
@@ -327,71 +451,81 @@ def enroll_keys(args):
         logging.debug('Assuming OVMF vars are enrolled')
     else:
         logging.debug("Starting VM to process enrollment")
-        cmd = generate_qemu_cmd(args)
-        p = subprocess.Popen(cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT)
-
-        read = p.stdout.readline()
-        if b'char device redirected' in read:
-            read = p.stdout.readline()
-
-
-        # Actions:
-        # 1. Wait for "BdsDxe: Press any key..."
-        # 2. Press any key
-        # 3. Wait for "Select Language"
-        # 4. Press down 1 times (Device Manager), press enter
-        # 5. Wait for "iSCSI Configuration"
-        # 6. Press down 2 times (Secure Boot Configuration), press enter
-        # 7. Wait for "Secure Boot Mode"
-        # 8. Press down 1 times (Standard Mode), press enter, press down (Custom mode), press enter
-        # 9. Press down (Custom Secure Boot Options), press enter
-        # 10. Wait for "DBT Options"
-        # 11. Press down 2 times ("DB Options"), press enter
-        # 12. Wait for "Enroll Signature"
-        # 13. Press enter
-        # 14. Wait for "Enroll Signature Using File"
-        # 15. Press enter
-        # 16. Wait for "NO VOLUME LABEL"
-        # 17. Press enter
-        # 18. Wait for "db.der"
-        # 19. Press down 3 times ("db.der"), press enter
-        # 20. Wait for "Commit Changes"
-        # 21. Press down 2 times ("Commit Changes"), press enter
-        # 22. Wait for "DBT Options"
-        # 23. Press up 1 times ("KEK Options"), press enter
-        # 24. Wait for "Enroll KEK"
-        # 25. Press enter
-        # 26. Wait for "Enroll KEK using File"
-        # 27. Press enter
-        # 28. Wait for "NO VOLUME LABEL"
-        # 29. Press enter
-        # 30. Wait for "KEK.der"
-        # 31. Press down 4 times ("KEK.der"), press enter
-        # 32. Wait for "Commit Changes"
-        # 33. Press down 2 times ("Commit Changes"), press enter
-        # 34. Wait for "DBT Options"
-        # 35. Press up 1 times ("PK Options"), press enter
-        # 36. Wait for "Enroll PK"
-        # 37. Press enter
-        # 38. Wait for "Enroll PK Using File"
-        # 39. Press enter
-        # 40. Wait for "NO VOLUME LABEL"
-        # 41. Press enter
-        # 42. Wait for "PK.der"
-        # 43. Press down 5 times ("PK.der"), press enter
-        # 44. Wait for "Commit Changes"
-        # 45. Press down 1 time ("Commit Changes"), press enter
-        # 46. Wait for "DBT Options"
-        # 47. Press Esc
-        # 48. Wait for "Current Secure Boot State"
-        # 49. Assure that "Enabled" is displayed
-        # 50. Terminate VM
-
-
-        raise NotImplementedError('Enrolling not yet implemented')
+        cmds = [
+            # Browsing to Secure Boot Management
+            (CMD_WAIT,      'Select Language'),
+            (CMD_PRESSKEY,  'down'),
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_WAIT,      'iSCSI Configuration'),
+            (CMD_PRESSKEY,  'down', 2),
+            (CMD_PRESSKEY,  'ret'),
+            # Enabling custom secure boot
+            (CMD_WAIT,      'Secure Boot Mode'),
+            (CMD_PRESSKEY,  'down'),
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_PRESSKEY,  'down'),
+            (CMD_PRESSKEY,  'ret'),
+            # Browsing to Secure Boot Key Management
+            (CMD_PRESSKEY,  'down'),
+            (CMD_PRESSKEY,  'ret'),
+            # Enroll db key
+            (CMD_WAIT,      'DBT Options'),
+            (CMD_PRESSKEY,  'down', 2),
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_WAIT,      'Enroll Signature'),
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_WAIT,      'Enroll Signature Using File'),
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_WAIT,      'NO VOLUME LABEL'),
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_WAIT,      'db.der'),
+            (CMD_PRESSKEY,  'down', 3),  # db.der
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_WAIT,      'db.der'),
+            (CMD_WAIT,      'Commit Changes'),
+            (CMD_PRESSKEY,  'down', 2),  # Commit Changes
+            (CMD_PRESSKEY,  'ret'),
+            # Enroll KEK, cursor still at DB key
+            (CMD_WAIT,      'DBT Options'),
+            (CMD_PRESSKEY,  'up'),
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_WAIT,      'Enroll KEK'),
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_WAIT,      'Enroll KEK using File'),
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_WAIT,      'NO VOLUME LABEL'),
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_WAIT,      'KEK.der'),
+            (CMD_PRESSKEY,  'down', 4),  # KEK.der
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_WAIT,      'KEK.der'),
+            (CMD_WAIT,      'Commit Changes'),
+            (CMD_PRESSKEY,  'down', 2),  # Commit Changes
+            (CMD_PRESSKEY,  'ret'),
+            # Enroll PK, cursor still at KEK
+            (CMD_WAIT,      'DBT Options'),
+            (CMD_PRESSKEY,  'up'),
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_WAIT,      'Enroll PK'),
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_WAIT,      'Enroll PK Using File'),
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_WAIT,      'NO VOLUME LABEL'),
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_WAIT,      'PK.der'),
+            (CMD_PRESSKEY,  'down', 5),  # PK.der
+            (CMD_PRESSKEY,  'ret'),
+            (CMD_WAIT,      'PK.der'),
+            (CMD_WAIT,      'Commit Changes'),
+            (CMD_PRESSKEY,  'down'),  # Commit Changes
+            (CMD_PRESSKEY,  'ret'),
+            # Browse to secure boot config
+            (CMD_WAIT,      'DBT Options'),
+            (CMD_PRESSKEY,  'esc'),
+            (CMD_WAIT,      'Current Secure Boot State'),
+            (CMD_WAIT,      'Enabled'),
+        ]
+        run_expect(args, cmds)
 
 
 def test_boot(args):
@@ -414,6 +548,7 @@ def main():
     else:
         generate_keys(args)
         sign_shim(args)
+        pass
     test_shim_signature(args)
     generate_disk(args)
     enroll_keys(args)
