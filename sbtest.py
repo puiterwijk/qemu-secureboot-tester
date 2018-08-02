@@ -364,6 +364,7 @@ CMD_SETSTARTED = 6
 
 
 current_qemu_process = None
+global_timeout_timer = None
 current_exit_code = 1
 
 
@@ -390,6 +391,7 @@ COMMON_COMMANDS = [
 
 def perform_expect(commands, sin, sout, print_out):
     global current_exit_code
+    global global_timeout_timer
 
     commands = COMMON_COMMANDS + commands
 
@@ -397,10 +399,10 @@ def perform_expect(commands, sin, sout, print_out):
     monitormode = False
 
     while len(commands) > 0:
-        t = None
+        global_timeout_timer = None
         if vmstarted:
-            t = threading.Timer(10.0, timeout_reached)
-            t.start()
+            global_timeout_timer = threading.Timer(10.0, timeout_reached)
+            global_timeout_timer.start()
 
         cmd = commands[0]
         opcode = cmd[0]
@@ -463,14 +465,16 @@ def perform_expect(commands, sin, sout, print_out):
         else:
             raise Exception('Invalid command opcode %d (args %s)', opcode, args)
 
-        if t is not None:
-            t.cancel()
+        if global_timeout_timer is not None:
+            global_timeout_timer.cancel()
+            global_timeout_timer = None
 
     logging.debug('Reached end of command sequence')
 
 
 def run_expect(args, commands):
     global current_qemu_process
+    global global_timeout_timer
 
     cmd = generate_qemu_cmd(args)
     logging.debug('Running QEMU, command: %s', ' '.join(cmd))
@@ -479,17 +483,23 @@ def run_expect(args, commands):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT)
     current_qemu_process = p
+    logging.debug('Setting QEMU process: %s', p)
 
     exc = None
     try:
         perform_expect(commands, p.stdin, p.stdout, args.print_output)
     except Exception as e:
+        logging.exception('Error processing request')
         exc = e
     finally:
+        logging.debug('Killing qemu process')
         p.kill()
         p.wait()
+    logging.debug('Clearing QEMU process')
     current_qemu_process = None
     if exc is not None:
+        if global_timeout_timer is not None:
+            global_timeout_timer.cancel()
         sys.exit(current_exit_code)
 
 
@@ -609,10 +619,9 @@ def test_boot(args):
         (CMD_LOG,           logging.INFO, "GRUB2 started correctly"),
         # Grub started!
         (CMD_TOGGLEMONITOR, False),
-        (CMD_SENDTEXT,      'linuxefi /kernelx64.efi debug text console=tty0 console=ttyS0,115200n8'),
-        (CMD_PRESSKEY,      'ret'),
-        (CMD_SENDTEXT,      'boot'),
-        (CMD_PRESSKEY,      'ret'),
+        (CMD_SENDTEXT,      'linuxefi /kernelx64.efi debug text console=tty0 console=ttyS0,115200n8\n'),
+        (CMD_PRESSKEY, 'ret'),
+        (CMD_SENDTEXT,      'boot\n'),
         # The Linux kernel should now be starting
         (CMD_WAIT,          'Command line: BOOT_IMAGE=/kernelx64.efi'),
         (CMD_WAIT,          'BIOS-provided physical RAM map:'),
