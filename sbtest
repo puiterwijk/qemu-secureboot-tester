@@ -594,7 +594,7 @@ def test_boot(args):
         (CMD_WAIT,          "EFI: Loaded cert 'SBTEST "),
         (CMD_WAIT,          "' linked to '.system_keyring'"),
     ]
-    for cert in args.expect_cert:
+    for cert in (args.expect_cert or []):
         cmds.append((CMD_WAIT, "EFI: Loaded cert '%s' linked to '.system_keyring'" % cert))
     run_expect(args, cmds)
 
