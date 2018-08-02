@@ -187,6 +187,8 @@ def parse_args():
     parser.add_argument('--test-signed',
                         help='Ensure the shim is trusted by pre-enrolled vars',
                         action='store_true')
+    parser.add_argument('--expect-cert', action='append',
+                        help='Certificate strings to expect to be loaded from moklistRT')
     parser.add_argument('shim_path', metavar='shim-path',
                         help='Specify a shim binary to test')
     parser.add_argument('grub2_path', metavar='grub2-path',
@@ -356,6 +358,9 @@ CMD_WAIT = 0
 CMD_PRESSKEY = 1
 CMD_SETEXITCODE = 2
 CMD_LOG = 3
+CMD_SENDTEXT = 4
+CMD_TOGGLEMONITOR = 5
+CMD_SETSTARTED = 6
 
 
 current_qemu_process = None
@@ -373,40 +378,36 @@ def timeout_reached():
         sys.exit(current_exit_code)
 
 
+COMMON_COMMANDS = [
+    (CMD_WAIT,          'char device redirected'),
+    (CMD_WAIT,          'BdsDxe: No bootable option or device was found.'),
+    (CMD_WAIT,          'BdsDxe: Press any key to enter the Boot Manager Menu.'),
+    (CMD_SETSTARTED,),
+    (CMD_TOGGLEMONITOR, True),
+    (CMD_PRESSKEY,      'ret'),
+]
+
+
 def perform_expect(commands, sin, sout, print_out):
     global current_exit_code
 
-    read = sout.readline()
-    if b'char device redirected' not in read:
-        raise Exception('Not found expected char device info (%s)' % strip_special(read))
-    read = sout.readline()
-    if b'BdsDxe: No bootable option or device was found.' not in read:
-        raise Exception('Not found expected boot error (%s)' % strip_special(read))
-    read = sout.readline()
-    if b'BdsDxe: Press any key to enter the Boot Manager Menu.' not in read:
-        raise Exception('Not found expected boot message (%s)' % strip_special(read))
-    
-    # Activate the QEMU monitor
-    sin.write(b'\x01')
-    sin.write(b'c')
-    sin.flush()
-    read = sout.readline()
-    if b'QEMU ' not in read:
-        raise Exception('Not found expected QEMU header (%s)' % strip_special(read))
-    read = sout.read(7)
-    if read != b'(qemu) ':
-        raise Exception('Not found expected QEMU monitor prefix (%s)' % strip_special(read))
-    sin.write(b'sendkey ret\n')
-    sin.flush()
+    commands = COMMON_COMMANDS + commands
+
+    vmstarted = False
+    monitormode = False
 
     while len(commands) > 0:
-        t = threading.Timer(5.0, timeout_reached)
-        t.start()
+        t = None
+        if vmstarted:
+            t = threading.Timer(10.0, timeout_reached)
+            t.start()
+
         cmd = commands[0]
         opcode = cmd[0]
         args = cmd[1:]
         commands = commands[1:]
         if opcode == CMD_PRESSKEY:
+            assert monitormode, "CMD_PRESSKEY is only valid in monitor mode"
             key = args[0].encode('ascii')
             repeat = 1
             if len(args) >= 2:
@@ -436,9 +437,34 @@ def perform_expect(commands, sin, sout, print_out):
             current_exit_code = code
         elif opcode == CMD_LOG:
             logging.log(*args)
+        elif opcode == CMD_SENDTEXT:
+            assert not monitormode, "CMD_PRESSKEY is only valid in plain text mode"
+            text = args[0].encode('ascii')
+            logging.debug('Sending text %s', text)
+            sin.write(text)
+            sin.flush()
+        elif opcode == CMD_TOGGLEMONITOR:
+            if monitormode != args[0]:
+                logging.debug('Toggling monitor mode to %s', args[0])
+                sin.write(b'\x01')
+                sin.write(b'c')
+                sin.flush()
+                monitormode = args[0]
+                if monitormode:
+                    # Verify that we entered monitor mode
+                    logging.debug('Verifying we entered monitor mode')
+                    commands = [
+                        (CMD_WAIT, 'QEMU '),
+                        (CMD_WAIT, '(qemu) '),
+                    ] + commands
+        elif opcode == CMD_SETSTARTED:
+            logging.debug('VM Marked as started, timer activating')
+            vmstarted = True
         else:
             raise Exception('Invalid command opcode %d (args %s)', opcode, args)
-        t.cancel()
+
+        if t is not None:
+            t.cancel()
 
     logging.debug('Reached end of command sequence')
 
@@ -581,9 +607,24 @@ def test_boot(args):
         (CMD_WAIT,          'grub>'),
         (CMD_SETEXITCODE,   EXIT_CODE_GRUB_ERROR),
         (CMD_LOG,           logging.INFO, "GRUB2 started correctly"),
-        (CMD_WAIT,          'grub>'),
         # Grub started!
+        (CMD_TOGGLEMONITOR, False),
+        (CMD_SENDTEXT,      'linuxefi /kernelx64.efi debug text console=tty0 console=ttyS0,115200n8'),
+        (CMD_PRESSKEY,      'ret'),
+        (CMD_SENDTEXT,      'boot'),
+        (CMD_PRESSKEY,      'ret'),
+        # The Linux kernel should now be starting
+        (CMD_WAIT,          'Command line: BOOT_IMAGE=/kernelx64.efi'),
+        (CMD_WAIT,          'BIOS-provided physical RAM map:'),
+        (CMD_SETEXITCODE,   EXIT_CODE_KERN_ERROR),
+        (CMD_LOG,           logging.INFO, "Kernel started correctly"),
+        # Let's verify that the built-in certs are parsed
+        (CMD_WAIT,          'Loaded X.509 cert'),
+        # Let's verify that the database key gets linked to the system keyring
+        (CMD_WAIT,          "EFI: Loaded cert 'SBTEXT "),
     ]
+    for cert in args.expect_cert:
+        cmds.append((CMD_WAIT, "EFI: Loaded cert '%s' linked to '.system_keyring'"))
     run_expect(args, cmds)
 
 def main():
