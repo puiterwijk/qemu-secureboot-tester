@@ -347,23 +347,27 @@ def generate_disk(args):
 
 CMD_WAIT = 0
 CMD_PRESSKEY = 1
+CMD_SETEXITCODE = 2
 
 
 current_qemu_process = None
+current_exit_code = 1
 
 
 def timeout_reached():
     if current_qemu_process is None:
         print('Timeout reached without qemu process?')
-        sys.exit(1)
+        sys.exit(current_exit_code)
     else:
         print('Timeout reached, aborting')
         current_qemu_process.kill()
         current_qemu_process.wait()
-        sys.exit(1)
+        sys.exit(current_exit_code)
 
 
 def perform_expect(commands, sin, sout, print_out):
+    global current_exit_code
+
     read = sout.readline()
     if b'char device redirected' not in read:
         raise Exception('Not found expected char device info (%s)' % strip_special(read))
@@ -418,6 +422,10 @@ def perform_expect(commands, sin, sout, print_out):
                 if needle in buf:
                     logging.debug('Found expected string')
                     break
+        elif opcode == CMD_SETEXITCODE:
+            code = int(args[0])
+            logging.debug('Setting future exit code to %d', code)
+            current_exit_code = code
         else:
             raise Exception('Invalid command opcode %d (args %s)', opcode, args)
         t.cancel()
@@ -436,12 +444,17 @@ def run_expect(args, commands):
         stderr=subprocess.STDOUT)
     current_qemu_process = p
 
+    exc = None
     try:
         perform_expect(commands, p.stdin, p.stdout, args.print_output)
+    except Exception as e:
+        exc = e
     finally:
         p.kill()
         p.wait()
     current_qemu_process = None
+    if exc is not None:
+        sys.exit(current_exit_code)
 
 
 def enroll_keys(args):
@@ -529,6 +542,7 @@ def enroll_keys(args):
 
 
 def test_boot(args):
+    # Okay, that was all well and good... Let's now actually test this stuff!
     pass
 
 
@@ -553,7 +567,6 @@ def main():
     generate_disk(args)
     enroll_keys(args)
     test_boot(args)
-
 
     if temp_workdir:
         logging.debug('Deleting temporary directory')
