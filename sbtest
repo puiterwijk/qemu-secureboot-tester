@@ -36,7 +36,7 @@ def strip_special(line):
 def run_command(cmd, stdin=None, sudo=False, **kwargs):
     logging.debug('Running command: %s', cmd)
     if sudo:
-        logging.info('Sudo command running')
+        logging.debug('Sudo command running')
         cmd = ['sudo'] + cmd
     logging.debug('Stdin: %s', stdin)
     p = subprocess.Popen(cmd,
