@@ -22,7 +22,7 @@ import uuid
 import sys
 
 
-EXIT_CODE_UNKNOWN       = 0
+EXIT_CODE_SUCCESS       = 0
 EXIT_CODE_SETUP_ERROR   = 1
 EXIT_CODE_SHIM_ERROR    = 2
 EXIT_CODE_GRUB_ERROR    = 3
