@@ -662,6 +662,8 @@ def main():
         logging.debug('Deleting temporary directory')
         shutil.rmtree(args.workdir)
 
+    logging.info('Booting has been fully verified')
+
 
 if __name__ == '__main__':
     main()
