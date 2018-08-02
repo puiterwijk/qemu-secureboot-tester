@@ -170,8 +170,6 @@ def parse_args():
                         default='/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd')
     parser.add_argument('--ovmf-template-vars', help='OVMF empty vars file',
                         default='/usr/share/edk2/ovmf/OVMF_VARS.fd')
-    parser.add_argument('--shell', help='UEFI shell',
-                        default='/usr/share/edk2/ovmf/Shell.efi')
     parser.add_argument('--ovmf-really-secboot',
                         help='Assume the OVMF binary is secureboot capable',
                         action='store_true')
@@ -206,8 +204,6 @@ def validate_args(args):
         raise Exception('Qemu path invalid')
     if not os.path.exists(args.ovmf_binary):
         raise Exception('OVMF code path invalid')
-    if not os.path.exists(args.shell):
-        raise Exception('UEFI Shell path invalid')
     if 'secboot' not in args.ovmf_binary and not args.ovmf_really_secboot:
         raise Exception('OVMF binary is likely not secureboot enabled')
     if not args.test_signed:
