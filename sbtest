@@ -179,11 +179,6 @@ def parse_args():
                         help='Assume the OVMF vars is secureboot capable',
                         action='store_true')
 
-    parser.add_argument('--cert-to-efi-sig-list', help='c-to-esl binary',
-                        default='cert-to-efi-sig-list')
-    parser.add_argument('--sign-efi-sig-list', help='esl-sign binary',
-                        default='sign-efi-sig-list')
-
     parser.add_argument('--test-signed',
                         help='Ensure the shim is trusted by pre-enrolled vars',
                         action='store_true')
@@ -263,34 +258,6 @@ def generate_keys(args):
                 '-inform', 'pem',
                 '-outform', 'der'],
             cwd=args.workdir)
-
-    logging.debug('Converting certs to ESLs')
-    for keytype in keytypes:
-        run_command([
-                args.cert_to_efi_sig_list, '-g', keyuuid,
-                '%s.crt' % keytype,
-                '%s.esl' % keytype],
-            cwd=args.workdir)
-
-    logging.debug('Signing ESLs')
-    # PK signs itself
-    run_command([
-            args.sign_efi_sig_list, '-g', keyuuid, 
-            '-k', 'PK.key', '-c', 'PK.crt',
-            'PK', 'PK.esl', 'PK.auth'],
-        cwd=args.workdir)
-    # PK signs KEK
-    run_command([
-            args.sign_efi_sig_list, '-g', keyuuid, 
-            '-k', 'PK.key', '-c', 'PK.crt',
-            'KEK', 'KEK.esl', 'KEK.auth'],
-        cwd=args.workdir)
-    # KEK signs DB
-    run_command([
-            args.sign_efi_sig_list, '-g', keyuuid, 
-            '-k', 'KEK.key', '-c', 'KEK.crt',
-            'db', 'db.esl', 'db.auth'],
-        cwd=args.workdir)
 
     logging.debug('Generating db P12 file')
     run_command([
