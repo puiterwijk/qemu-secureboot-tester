@@ -316,7 +316,7 @@ def generate_disk(args):
         for copy in tocopy:
             # This copy must run as root, because vfat does not have
             # permissions
-            run_command(['cp', *copy], sudo=True)
+            run_command(['cp'] + list(copy), sudo=True)
 
         logging.debug('Files on test disk: %s', os.listdir(disk))
 
