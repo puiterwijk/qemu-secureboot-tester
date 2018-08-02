@@ -620,7 +620,6 @@ def test_boot(args):
         # Grub started!
         (CMD_TOGGLEMONITOR, False),
         (CMD_SENDTEXT,      'linuxefi /kernelx64.efi debug text console=tty0 console=ttyS0,115200n8\n'),
-        (CMD_PRESSKEY, 'ret'),
         (CMD_SENDTEXT,      'boot\n'),
         # The Linux kernel should now be starting
         (CMD_WAIT,          'Command line: BOOT_IMAGE=/kernelx64.efi'),
