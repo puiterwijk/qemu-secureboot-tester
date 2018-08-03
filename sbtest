@@ -337,8 +337,11 @@ def timeout_reached():
         sys.exit(current_exit_code)
     else:
         print('Timeout reached, aborting')
-        current_qemu_process.kill()
-        current_qemu_process.wait()
+        try:
+            current_qemu_process.kill()
+            current_qemu_process.wait()
+        except:
+            logging.debug('Failed to kill, maybe the qemu process was already dead?')
         sys.exit(current_exit_code)
 
 
@@ -456,8 +459,11 @@ def run_expect(args, commands):
         exc = e
     finally:
         logging.debug('Killing qemu process')
-        p.kill()
-        p.wait()
+        try:
+            p.kill()
+            p.wait()
+        except:
+            logging.debug('Main loop failed to kill qemu')
     logging.debug('Clearing QEMU process')
     current_qemu_process = None
     if exc is not None:
