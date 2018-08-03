@@ -386,8 +386,8 @@ def perform_expect(commands, sin, sout, print_out):
                 sin.flush()
                 repeat -= 1
         elif opcode == CMD_WAIT:
-            needle = args[0].encode('ascii')
-            logging.debug('Waiting for %s', needle)
+            needles = [needle.encode('ascii') for needle in args]
+            logging.debug('Waiting for any of %s', needle)
             buf = b''
             while True:
                 read = sout.read(1)
@@ -396,8 +396,13 @@ def perform_expect(commands, sin, sout, print_out):
                 if print_out:
                     print(strip_special(read), end='')
                 buf += read
-                if needle in buf:
-                    logging.debug('Found expected string')
+                foundneedle = False
+                for needle in needles:
+                    if needle in buf:
+                        logging.debug('Found expected string: %s', needle)
+                        foundneedle = True
+                        break
+                if foundneedle:
                     break
         elif opcode == CMD_SETEXITCODE:
             code = args[0]
@@ -595,6 +600,9 @@ def test_boot(args):
         (CMD_WAIT,          'BIOS-provided physical RAM map:'),
         (CMD_SETEXITCODE,   EXIT_CODE_KERN_ERROR),
         (CMD_LOG,           logging.INFO, "Kernel started correctly"),
+        # Verify that secure boot mode is enabled
+        (CMD_WAIT,          'Secure boot enabled',
+                            'Kernel is locked down from EFI secure boot'),
         # Let's verify that the built-in certs are parsed
         (CMD_WAIT,          'Loaded X.509 cert'),
         # Let's verify that the database key gets linked to the system keyring
