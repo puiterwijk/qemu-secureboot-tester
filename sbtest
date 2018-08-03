@@ -371,6 +371,8 @@ def perform_expect(commands, sin, sout, print_out):
             global_timeout_timer.start()
 
         cmd = commands[0]
+        if not isinstance(cmd, tuple):
+            raise Exception('Command %s is not a tuple with opcode, arguments' % cmd)
         opcode = cmd[0]
         args = cmd[1:]
         commands = commands[1:]
