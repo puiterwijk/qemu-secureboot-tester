@@ -413,7 +413,7 @@ def perform_expect(commands, sin, sout, print_out):
         elif opcode == CMD_LOG:
             logging.log(*args)
         elif opcode == CMD_SENDTEXT:
-            assert not monitormode, "CMD_PRESSKEY is only valid in plain text mode"
+            assert not monitormode, "CMD_SENDTEXT is only valid in plain text mode"
             text = args[0].encode('ascii')
             logging.debug('Sending text %s', text)
             sin.write(text)
