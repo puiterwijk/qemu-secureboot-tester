@@ -187,6 +187,14 @@ def parse_args():
                         help='Specify a grub2 efi binary to test')
     parser.add_argument('kernel_path', metavar='kernel-path',
                         help='Specify a kernel efi binary to test')
+
+    parser.add_argument('--tpm', '-t', help='Enable TPM during test',
+                        action='store_true')
+    parser.add_argument('--swtpm-path', help='Path to swtpm binary',
+                        default='/usr/bin/swtpm')
+    parser.add_argument('--swtpm-tpm2', help='Use TPMv2 interface for swtpm',
+                        action='store_true')
+
     args = parser.parse_args()
     validate_args(args)
     return args
@@ -211,6 +219,8 @@ def validate_args(args):
     else:
         if 'secboot' not in args.ovmf_template_vars and not args.ovmf_vars_really_secboot:
             raise Exception('OVMF vars file is likely not secureboot enrolled')
+    if args.tpm and not os.path.exists(args.swtpm_path):
+        raise SystemExit('SWTPM path invalid')
 
     verbosity = (args.verbose or 1) - (args.quiet or 0)
     level = logging.INFO
@@ -438,7 +448,7 @@ def perform_expect(commands, sin, sout, print_out):
             logging.debug('VM Marked as started, timer activating')
             vmstarted = True
         else:
-            raise Exception('Invalid command opcode %d (args %s)', opcode, args)
+            raise Exception('Invalid command opcode %d (args %s)' % (opcode, args))
 
         if global_timeout_timer is not None:
             global_timeout_timer.cancel()
@@ -447,11 +457,11 @@ def perform_expect(commands, sin, sout, print_out):
     logging.debug('Reached end of command sequence')
 
 
-def run_expect(args, commands):
+def run_expect(args, commands, *extra_qemu):
     global current_qemu_process
     global global_timeout_timer
 
-    cmd = generate_qemu_cmd(args)
+    cmd = generate_qemu_cmd(args) + list(extra_qemu)
     logging.debug('Running QEMU, command: %s', ' '.join(cmd))
     p = subprocess.Popen(cmd,
         stdin=subprocess.PIPE,
@@ -615,7 +625,48 @@ def test_boot(args):
     ]
     for cert in (args.expect_cert or []):
         cmds.append((CMD_WAIT, "EFI: Loaded cert '%s' linked to '.system_keyring'" % cert))
-    run_expect(args, cmds)
+
+    extra_qemu = []
+    extra_qemu.extend(build_tpm_command(args))
+
+    run_expect(args, cmds, *extra_qemu)
+
+
+def build_tpm_command(args):
+    if not args.tpm:
+        return []
+    return [
+        '-chardev', 'socket,id=chrtpm,path=%s' % os.path.join(args.workdir, 'tpmsock'),
+        '-tpmdev', 'emulator,id=tpm0,chardev=chrtpm',
+        '-device', 'tpm-tis,tpmdev=tpm0'
+    ]
+
+
+def set_up_tpm(args):
+    logging.debug("Starting swTPM")
+    tpmstate = os.path.join(args.workdir, 'tpmstate')
+    os.mkdir(tpmstate)
+    logfile = open(os.path.join(args.workdir, 'tpmlog'), 'w')
+    cmd = [args.swtpm_path,
+           'socket',
+           '--tpmstate', 'dir=%s' % tpmstate,
+           '--ctrl', 'type=unixio,path=%s' % os.path.join(args.workdir, 'tpmsock'),
+           '--log', 'level=20']
+    if args.swtpm_tpm2:
+        cmd.append('--tpm2')
+    p = subprocess.Popen(cmd, stdout=logfile, stderr=subprocess.STDOUT)
+    return (p, logfile)
+
+
+def tear_down_tpm(args, tpmstate):
+    if tpmstate is None:
+        return
+    logging.debug("Tearing down swTPM")
+    tpmproc, logfile = tpmstate
+    tpmproc.terminate()
+    tpmproc.wait()
+    logfile.close()
+
 
 def main():
     args = parse_args()
@@ -637,7 +688,14 @@ def main():
     test_shim_signature(args)
     generate_disk(args)
     enroll_keys(args)
-    test_boot(args)
+    # If requested, set up the TPM
+    try:
+        tpmstate = None
+        if args.tpm:
+            tpmstate = set_up_tpm(args)
+        test_boot(args)
+    finally:
+        tear_down_tpm(args, tpmstate)
 
     if temp_workdir:
         logging.debug('Deleting temporary directory')
