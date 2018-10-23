@@ -331,12 +331,13 @@ global_timeout_timer = None
 current_exit_code = 1
 
 
-def timeout_reached():
+def timeout_reached(*cmd):
     if current_qemu_process is None:
         print('Timeout reached without qemu process?')
         sys.exit(current_exit_code)
     else:
         print('Timeout reached, aborting')
+        print('Timeout occured during: %s' % (cmd,))
         try:
             current_qemu_process.kill()
             current_qemu_process.wait()
@@ -366,13 +367,14 @@ def perform_expect(commands, sin, sout, print_out):
 
     while len(commands) > 0:
         global_timeout_timer = None
-        if vmstarted:
-            global_timeout_timer = threading.Timer(10.0, timeout_reached)
-            global_timeout_timer.start()
-
         cmd = commands[0]
         if not isinstance(cmd, tuple):
             raise Exception('Command %s is not a tuple with opcode, arguments' % cmd)
+
+        if vmstarted:
+            global_timeout_timer = threading.Timer(10.0, timeout_reached, args=cmd)
+            global_timeout_timer.start()
+
         opcode = cmd[0]
         args = cmd[1:]
         commands = commands[1:]
