@@ -642,7 +642,7 @@ def build_tpm_command(args):
     return [
         '-chardev', 'socket,id=chrtpm,path=%s' % os.path.join(args.workdir, 'tpmsock'),
         '-tpmdev', 'emulator,id=tpm0,chardev=chrtpm',
-        '-device', 'tpm-tis,tpmdev=tpm0'
+        '-device', 'tpm-crb,tpmdev=tpm0'
     ]
 
 
