@@ -624,11 +624,12 @@ def test_boot(args):
     if not args.test_signed:
         cmds.extend([
             # Let's verify that the database key gets linked to the system keyring
-            (CMD_WAIT,          "EFI: Loaded cert 'SBTEST "),
-            (CMD_WAIT,          "' linked to '.system_keyring'"),
+            (CMD_WAIT,          "EFI: Loaded cert 'SBTEST ",
+                                "Loaded X.509 cert 'SBTEST "),
         ])
     for cert in (args.expect_cert or []):
-        cmds.append((CMD_WAIT, "EFI: Loaded cert '%s' linked to '.system_keyring'" % cert))
+        cmds.append((CMD_WAIT, "EFI: Loaded cert '%s' linked to '.system_keyring'" % cert,
+                               "integrity: Loaded X.509 cert '%s'" % cert))
 
     extra_qemu = []
     extra_qemu.extend(build_tpm_command(args))
